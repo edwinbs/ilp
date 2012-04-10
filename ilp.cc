@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <map>
 #include <set>
+#include <utility>
+#include <vector>
 
 using namespace std;
 
@@ -63,7 +65,7 @@ event_basic_block(void *drcontext, void *tag, instrlist_t *bb,
     int ni = 0;
     int nc = 0;
     
-    map<reg_id_t, int>  reg_nc;
+    vector< pair<opnd_t, int> > opnd_nc;
 
     /* Look for the following types of dependencies:
      *     reg -> reg
@@ -74,47 +76,76 @@ event_basic_block(void *drcontext, void *tag, instrlist_t *bb,
     for (instr_t* instr = instrlist_first(bb);
          instr != NULL; instr = instr_get_next(instr))
     {
-        set<reg_id_t> used_regs;
+        vector<opnd_t> unique_opnds;
         
         /* Process source operands */
         int src_opnds = instr_num_srcs(instr);
         for (int i = 0; i < src_opnds; ++i)
         {   
             opnd_t opnd = instr_get_src(instr, i);
-            if (opnd_is_reg(opnd))
+            
+            vector<opnd_t>::const_iterator it1;
+            for (it1 = unique_opnds.begin(); it1 != unique_opnds.end(); ++it1)
             {
-                used_regs.insert(opnd_get_reg(opnd));
+                if (opnd_share_reg(*it1, opnd))
+                    break;
             }
-            else if (opnd_is_base_disp(opnd))
-            {
-                used_regs.insert(opnd_get_base(opnd));
-            }
+            
+            if (it1 == unique_opnds.end())
+                unique_opnds.push_back(opnd);
         }
         
-        for (set<reg_id_t>::const_iterator it = used_regs.begin();
-             it != used_regs.end(); ++it)
+        for (vector<opnd_t>::const_iterator it1 = unique_opnds.begin();
+             it1 != unique_opnds.end(); ++it1)
         {
-            nc = _MAX(nc, reg_nc[*it]);
+            vector< pair<opnd_t, int> >::const_iterator it2;
+            for (it2 = opnd_nc.begin(); it2 != opnd_nc.end(); ++it2)
+            {
+                if (opnd_share_reg(it2->first, *it1))
+                {
+                    nc = _MAX(nc, it2->second);
+                    break;
+                }
+            }
         }
         
-        used_regs.clear();
+        unique_opnds.clear();
         
         /* Process destination operands */
         int dst_opnds = instr_num_dsts(instr);
         for (int i = 0; i < dst_opnds; ++i)
         {
             opnd_t opnd = instr_get_dst(instr, i);
-            if (opnd_is_reg(opnd))
+            
+            if (!opnd_is_reg(opnd))
+                continue;
+            
+            vector<opnd_t>::const_iterator it1;
+            for (it1 = unique_opnds.begin(); it1 != unique_opnds.end(); ++it1)
             {
-                used_regs.insert(opnd_get_reg(opnd));
+                if (opnd_share_reg(*it1, opnd))
+                    break;
             }
+            
+            if (it1 == unique_opnds.end())
+                unique_opnds.push_back(opnd);
         }
         
-        for (set<reg_id_t>::const_iterator it = used_regs.begin();
-             it != used_regs.end(); ++it)
+        for (vector<opnd_t>::const_iterator it1 = unique_opnds.begin();
+             it1 != unique_opnds.end(); ++it1)
         {
-            ++reg_nc[*it];
-            nc = _MAX(nc, reg_nc[*it]);
+            vector< pair<opnd_t, int> >::iterator it2;
+            for (it2 = opnd_nc.begin(); it2 != opnd_nc.end(); ++it2)
+            {
+                if (opnd_share_reg(it2->first, *it1))
+                {
+                    ++(it2->second);
+                    nc = _MAX(nc, it2->second);
+                    break;
+                }
+            }
+            if (it2 == opnd_nc.end())
+                opnd_nc.push_back(pair<opnd_t, int>(*it1, 1));
         }
         
         /* Number of instructions */
