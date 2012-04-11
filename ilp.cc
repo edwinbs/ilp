@@ -1,6 +1,8 @@
 #include "dr_api.h"
 
 #include <stdint.h>
+#include <map>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -50,48 +52,43 @@ event_exit(void)
 #endif
 }
 
-void insert_if_unique(vector<opnd_t>& vecOpnds, const opnd_t& opnd)
+inline reg_id_t
+get_full_size_reg(reg_id_t reg)
 {
-    for (vector<opnd_t>::const_iterator it = vecOpnds.begin();
-         it != vecOpnds.end(); ++it)
+    switch (reg)
     {
-        if (opnd_share_reg(*it, opnd))
-            return;
+    case DR_REG_EAX: case DR_REG_AX: case DR_REG_AH: case DR_REG_AL: return DR_REG_EAX;
+    case DR_REG_ECX: case DR_REG_CX: case DR_REG_CH: case DR_REG_CL: return DR_REG_ECX;
+    case DR_REG_EDX: case DR_REG_DX: case DR_REG_DH: case DR_REG_DL: return DR_REG_EDX;
+    case DR_REG_EBX: case DR_REG_BX: case DR_REG_BH: case DR_REG_BL: return DR_REG_EBX;
     }
-    vecOpnds.push_back(opnd);
+    return reg;
 }
 
-pair<opnd_t, int> *get_match_by_reg(vector< pair<opnd_t, int> >& vecPairs, const opnd_t& opnd)
+inline void
+insert_unique(vector<opnd_t>& list, const opnd_t& opnd)
 {
-    for (vector< pair<opnd_t, int> >::iterator it = vecPairs.begin();
-         it != vecPairs.end(); ++it)
+    for (vector<opnd_t>::const_iterator it = list.begin();
+         it != list.end(); ++it)
     {
-        if (opnd_share_reg(it->first, opnd))
+        if (opnd_same_address(opnd, *it))
+            return;
+    }
+    list.push_back(opnd);
+}
+
+inline pair<opnd_t, int>*
+find_same_mem(vector< pair<opnd_t, int> >& list, const opnd_t& opnd)
+{
+    for (vector< pair<opnd_t, int> >::iterator it = list.begin();
+         it != list.end(); ++it)
+    {
+        if (opnd_same_address(opnd, it->first))
         {
             return &(*it);
         }
     }
     return NULL;
-}
-
-void get_unique_src_opnds(vector<opnd_t>& vecUniqueOpnds, instr_t* instr)
-{
-    int src_opnds = instr_num_srcs(instr);
-    for (int i = 0; i < src_opnds; ++i)
-    {
-        insert_if_unique(vecUniqueOpnds, instr_get_src(instr, i));
-    }
-}
-
-void get_unique_dst_opnds(vector<opnd_t>& vecUniqueOpnds, instr_t* instr)
-{
-    int dst_opnds = instr_num_dsts(instr);
-    for (int i = 0; i < dst_opnds; ++i)
-    {
-        opnd_t opnd = instr_get_dst(instr, i);
-        if (!opnd_is_reg(opnd)) continue;
-        insert_if_unique(vecUniqueOpnds, opnd);
-    }
 }
 
 #define _MAX(x, y) (((x) > (y)) ? (x) : (y))
@@ -101,7 +98,8 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
 {
     ni = 0;
     int nc = 0;
-    vector< pair<opnd_t, int> > opnd_nc;
+    map<reg_id_t, int> reg_nc;
+    vector< pair<opnd_t, int> >  mem_nc;
 
     /* Look for the following types of dependencies:
      *     reg -> reg
@@ -115,31 +113,70 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
         int ic = 0;
         
         /* Process source operands */
-        vector<opnd_t> unique_srcs;
-        get_unique_src_opnds(unique_srcs, instr);
-        
-        for (vector<opnd_t>::const_iterator it = unique_srcs.begin();
-             it != unique_srcs.end(); ++it)
+        set<reg_id_t>    src_regs;
+        vector<opnd_t>   src_mems;
+        int src_cnt = instr_num_srcs(instr);
+        for (int i = 0; i < src_cnt; ++i)
         {
-            pair<opnd_t, int> *pMatch = get_match_by_reg(opnd_nc, *it);
-            if (pMatch)
-                ic = _MAX(ic, pMatch->second);
+            opnd_t opnd = instr_get_src(instr, i);
+            if (opnd_is_reg(opnd))
+                src_regs.insert(opnd_get_reg(opnd));
+            else if (opnd_is_base_disp(opnd))
+            {
+                src_regs.insert(opnd_get_base(opnd));
+                insert_unique(src_mems, opnd);
+            }
+            else if (opnd_is_abs_addr(opnd) || opnd_is_pc(opnd))
+            {
+                insert_unique(src_mems, opnd);
+            }
+        }
+        
+        for (set<reg_id_t>::const_iterator it = src_regs.begin();
+             it != src_regs.end(); ++it)
+        {
+            ic = _MAX(ic, reg_nc[*it]);
+        }
+        
+        for (vector<opnd_t>::const_iterator it = src_mems.begin();
+             it != src_mems.end(); ++it)
+        {
+            pair<opnd_t, int>* pRecord = find_same_mem(mem_nc, *it);
+            if (pRecord)
+                ic = _MAX(ic, pRecord->second);        
         }
         
         nc = _MAX(ic, nc);
         
         /* Process destination operands */
-        vector<opnd_t> unique_dsts;
-        get_unique_dst_opnds(unique_dsts, instr);
-        
-        for (vector<opnd_t>::const_iterator it = unique_dsts.begin();
-             it != unique_dsts.end(); ++it)
+        set<reg_id_t>    dst_regs;
+        vector<opnd_t>   dst_mems;
+        int dst_cnt = instr_num_dsts(instr);
+        for (int i = 0; i < dst_cnt; ++i)
         {
-            pair<opnd_t, int> *pMatch = get_match_by_reg(opnd_nc, *it);
-            if (pMatch)
-                pMatch->second = ic + 1;
+            opnd_t opnd = instr_get_dst(instr, i);
+            if (opnd_is_reg(opnd))
+                dst_regs.insert(opnd_get_reg(opnd));
+            else if (opnd_is_base_disp(opnd) || opnd_is_abs_addr(opnd))
+            {
+                insert_unique(dst_mems, opnd);
+            }
+        }
+        
+        for (set<reg_id_t>::const_iterator it = dst_regs.begin();
+             it != dst_regs.end(); ++it)
+        {
+            reg_nc[*it] = ic + 1;
+        }
+        
+        for (vector<opnd_t>::const_iterator it = dst_mems.begin();
+             it != dst_mems.end(); ++it)
+        {
+            pair<opnd_t, int>* pRecord = find_same_mem(mem_nc, *it);
+            if (pRecord)
+                pRecord->second = ic + 1;
             else
-                opnd_nc.push_back(pair<opnd_t, int>(*it, 1));
+                mem_nc.push_back(pair<opnd_t, int>(*it, 1));
         }
         
         /* Increment the instruction count */
@@ -157,7 +194,7 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
         throw -1;
     }
     
-    dr_fprintf(STDERR, "BB: size=%d, ILP=%.3f\n", ni, (double) ilp / 1000);
+    //dr_fprintf(STDERR, "BB: size=%d, ILP=%.3f\n", ni, (double) ilp / 1000);
 }
 
 #define TESTALL(mask, var) (((mask) & (var)) == (mask))
