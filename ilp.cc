@@ -91,6 +91,26 @@ find_same_mem(vector< pair<opnd_t, int> >& list, const opnd_t& opnd)
     return NULL;
 }
 
+inline void
+get_read_eflags(uint eflags, set<int>& read_eflags)
+{
+    if (eflags & EFLAGS_READ_AF) read_eflags.insert(EFLAGS_AF);
+    if (eflags & EFLAGS_READ_CF) read_eflags.insert(EFLAGS_CF);
+    if (eflags & EFLAGS_READ_DF) read_eflags.insert(EFLAGS_DF);
+    if (eflags & EFLAGS_READ_OF) read_eflags.insert(EFLAGS_OF);
+    if (eflags & EFLAGS_READ_PF) read_eflags.insert(EFLAGS_PF);
+}
+
+inline void
+get_write_eflags(uint eflags, set<int>& write_eflags)
+{
+    if (eflags & EFLAGS_WRITE_AF) write_eflags.insert(EFLAGS_AF);
+    if (eflags & EFLAGS_WRITE_CF) write_eflags.insert(EFLAGS_CF);
+    if (eflags & EFLAGS_WRITE_DF) write_eflags.insert(EFLAGS_DF);
+    if (eflags & EFLAGS_WRITE_OF) write_eflags.insert(EFLAGS_OF);
+    if (eflags & EFLAGS_WRITE_PF) write_eflags.insert(EFLAGS_PF);
+}
+
 #define _MAX(x, y) (((x) > (y)) ? (x) : (y))
 
 static void
@@ -100,11 +120,13 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
     int nc = 0;
     map<reg_id_t, int> reg_nc;
     vector< pair<opnd_t, int> >  mem_nc;
+    map<int, int> eflags_nc;
 
     /* Look for the following types of dependencies:
      *     reg -> reg
      *     reg -> base_reg in base+disp memory
-     *     mem -> mem (base+disp), same base and disp
+     *     mem -> mem, in opnd_same_mem() we trust
+     *     EFLAGS
      */
 
     for (instr_t* instr = instrlist_first(bb);
@@ -115,6 +137,8 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
         /* Process source operands */
         set<reg_id_t>    src_regs;
         vector<opnd_t>   src_mems;
+        set<int>         read_eflags;
+        
         int src_cnt = instr_num_srcs(instr);
         for (int i = 0; i < src_cnt; ++i)
         {
@@ -132,6 +156,9 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
             }
         }
         
+        uint eflags = instr_get_eflags(instr);
+        get_read_eflags(eflags, read_eflags);
+        
         for (set<reg_id_t>::const_iterator it = src_regs.begin();
              it != src_regs.end(); ++it)
         {
@@ -146,11 +173,19 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
                 ic = _MAX(ic, pRecord->second);        
         }
         
+        for (set<int>::const_iterator it = read_eflags.begin();
+             it != read_eflags.end(); ++it)
+        {
+            ic = _MAX(ic, eflags_nc[*it]);
+        }
+        
         nc = _MAX(ic, nc);
         
         /* Process destination operands */
         set<reg_id_t>    dst_regs;
         vector<opnd_t>   dst_mems;
+        set<int>         write_eflags;
+        
         int dst_cnt = instr_num_dsts(instr);
         for (int i = 0; i < dst_cnt; ++i)
         {
@@ -162,6 +197,8 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
                 insert_unique(dst_mems, opnd);
             }
         }
+        
+        get_write_eflags(eflags, write_eflags);
         
         for (set<reg_id_t>::const_iterator it = dst_regs.begin();
              it != dst_regs.end(); ++it)
@@ -177,6 +214,12 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
                 pRecord->second = ic + 1;
             else
                 mem_nc.push_back(pair<opnd_t, int>(*it, 1));
+        }
+        
+        for (set<int>::const_iterator it = write_eflags.begin();
+             it != write_eflags.end(); ++it)
+        {
+            eflags_nc[*it] = ic + 1;
         }
         
         /* Increment the instruction count */
