@@ -6,9 +6,9 @@
 #include <utility>
 #include <vector>
 
-//#define USE_CLEAN_CALLS
+#define USE_CLEAN_CALLS
 //#define THREAD_SAFE_CLEAN_CALLS
-//#define FIND_DEAD_EFLAGS
+#define FIND_DEAD_EFLAGS
 
 using namespace std;
 
@@ -18,6 +18,7 @@ typedef struct {
 } ilp_stats;
 
 static ilp_stats stats;
+static ilp_stats offline_stats;
 
 #ifdef THREAD_SAFE_CLEAN_CALLS
 static void* stats_mutex;
@@ -32,6 +33,9 @@ dr_init(client_id_t id)
 {
     stats.total_ni = 0;
     stats.sum_ilp = 0;
+
+    offline_stats.total_ni = 0;
+    offline_stats.sum_ilp = 0;
     
 #ifdef THREAD_SAFE_CLEAN_CALLS
     stats_mutex = dr_mutex_create();
@@ -44,8 +48,11 @@ dr_init(client_id_t id)
 static void 
 event_exit(void)
 {
-    printf("Average instruction level parallelism: %.3f\n",
+    fprintf(stderr, "ilp=%.4f\n",
         (double) stats.sum_ilp / stats.total_ni / 1000);
+
+    fprintf(stderr, "ilp-offline=%.4f\n",
+        (double) offline_stats.sum_ilp / offline_stats.total_ni / 1000);
         
 #ifdef THREAD_SAFE_CLEAN_CALLS
     dr_mutex_destroy(stats_mutex);
@@ -119,7 +126,8 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
     ni = 0;
     int nc = 0;
     map<reg_id_t, int> reg_nc;
-    vector< pair<opnd_t, int> >  mem_nc;
+    //vector< pair<opnd_t, int> >  mem_nc;
+    int mem_nc = 0;
     map<int, int> eflags_nc;
 
     /* Look for the following types of dependencies:
@@ -155,6 +163,23 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
                 insert_unique(src_mems, opnd);
             }
         }
+
+        int dst_cnt_1 = instr_num_dsts(instr);
+        for (int i = 0; i < dst_cnt_1; ++i)
+        {
+            opnd_t opnd = instr_get_dst(instr, i);
+            if (opnd_is_reg(opnd))
+                src_regs.insert(opnd_get_reg(opnd));
+            else if (opnd_is_base_disp(opnd))
+            {
+                src_regs.insert(opnd_get_base(opnd));
+                insert_unique(src_mems, opnd);
+            }
+            else if (opnd_is_abs_addr(opnd) || opnd_is_pc(opnd))
+            {
+                insert_unique(src_mems, opnd);
+            }
+        }
         
         uint eflags = instr_get_eflags(instr);
         get_read_eflags(eflags, read_eflags);
@@ -168,9 +193,10 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
         for (vector<opnd_t>::const_iterator it = src_mems.begin();
              it != src_mems.end(); ++it)
         {
-            pair<opnd_t, int>* pRecord = find_same_mem(mem_nc, *it);
-            if (pRecord)
-                ic = _MAX(ic, pRecord->second);        
+            //pair<opnd_t, int>* pRecord = find_same_mem(mem_nc, *it);
+            //if (pRecord)
+            //    ic = _MAX(ic, pRecord->second);    
+            ic = _MAX(ic, mem_nc);    
         }
         
         for (set<int>::const_iterator it = read_eflags.begin();
@@ -209,11 +235,12 @@ calculate_ilp(instrlist_t* bb, int32_t& ni, int32_t& ilp)
         for (vector<opnd_t>::const_iterator it = dst_mems.begin();
              it != dst_mems.end(); ++it)
         {
-            pair<opnd_t, int>* pRecord = find_same_mem(mem_nc, *it);
-            if (pRecord)
-                pRecord->second = ic + 1;
-            else
-                mem_nc.push_back(pair<opnd_t, int>(*it, 1));
+            //pair<opnd_t, int>* pRecord = find_same_mem(mem_nc, *it);
+            //if (pRecord)
+            //    pRecord->second = ic + 1;
+            //else
+            //    mem_nc.push_back(pair<opnd_t, int>(*it, 1));
+            mem_nc = ic + 1;
         }
         
         for (set<int>::const_iterator it = write_eflags.begin();
@@ -304,6 +331,9 @@ event_basic_block(void *dc, void *tag, instrlist_t *bb,
     
     calculate_ilp(bb, num_instr, ilp);
     ilp_sum_offset = ilp * num_instr;
+
+    offline_stats.total_ni += num_instr;
+    offline_stats.sum_ilp += ilp_sum_offset;
     
     instr_t* pos = instrlist_first(bb);
 
